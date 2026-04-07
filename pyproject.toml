@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statestrike"
+version = "0.1.0"
+description = "OpenEnv-ready stateful API security audit environment"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "StateStrike" }]
+dependencies = [
+    "openenv-core==0.1.0",
+    "fastapi==0.111.0",
+    "uvicorn[standard]==0.30.1",
+    "sqlalchemy==2.0.30",
+    "httpx==0.27.0",
+    "pydantic==2.7.1",
+    "streamlit==1.35.0",
+    "plotly==5.22.0",
+    "python-dotenv==1.0.1",
+    "pytest==8.2.0",
+    "pytest-asyncio==0.23.7",
+    "rich==13.7.1",
+    "websockets>=15.0",
+    "openai>=1.0.0",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[tool.setuptools.packages.find]
+include = ["statestrike_env*", "honeypot*", "agent*", "server*"]
