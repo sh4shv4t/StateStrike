@@ -1,0 +1,43 @@
+services:
+  honeypot:
+    build:
+      context: .
+      dockerfile: Dockerfile.honeypot
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./statestrike.db:/app/statestrike.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  statestrike-env:
+    build:
+      context: .
+      dockerfile: Dockerfile.env
+    working_dir: /app
+    ports:
+      - "8001:8001"
+    depends_on:
+      honeypot:
+        condition: service_healthy
+    environment:
+      HONEYPOT_URL: http://honeypot:8000
+      PYTHONPATH: /app
+
+  dashboard:
+    image: python:3.11-slim
+    working_dir: /app
+    command: >
+      sh -c "pip install -r requirements.txt &&
+      streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0"
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app
+      - ./telemetry.json:/app/telemetry.json
+    depends_on:
+      - statestrike-env
