@@ -1,0 +1,41 @@
+name: statestrike
+version: "1.0.0"
+description: >
+  A stateful API security audit environment where an agent learns to discover
+  real infrastructure vulnerabilities through systematic endpoint exploration
+  and stateful exploit chaining.
+author: StateStrike Team
+license: MIT
+tags:
+  - security
+  - api-testing
+  - stateful
+  - openenv
+tasks:
+  - id: endpoint_discovery
+    description: >
+      Identify all reachable API endpoints. Agent receives the base URL
+      and must probe systematically to discover which endpoints exist.
+    difficulty: easy
+    max_steps: 20
+    reward_range: [0.0, 1.0]
+  - id: vulnerability_probe
+    description: >
+      Identify and correctly classify at least one vulnerability in the
+      target API (redos or db_degradation).
+    difficulty: medium
+    max_steps: 30
+    reward_range: [0.0, 1.0]
+  - id: exploit_chain
+    description: >
+      Execute the full stateful exploit chain: create user, build order
+      history, trigger DB degradation slow path, and trigger ReDoS.
+    difficulty: hard
+    max_steps: 60
+    reward_range: [0.0, 1.0]
+observation_space:
+  type: object
+  description: HTTP response details including status, latency, body, and session state
+action_space:
+  type: object
+  description: HTTP action with endpoint choice, method, and payload strategy

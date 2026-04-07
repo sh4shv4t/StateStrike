@@ -1,147 +1,124 @@
-## StateStrike
+  _____ _        _       ____  _        _ _
+ / ____| |      | |     / __ \| |      (_) |
+| (___ | |_ __ _| |_ ___| |  | | |_   _ _| |_
+ \___ \| __/ _` | __/ _ \ |  | | | | | | | __|
+ ____) | || (_| | ||  __/ |__| | | |_| | | |_
+|_____/ \__\__,_|\__\___|\___\_\_|\__,_|_|\__|
 
-![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
-![OpenEnv Compliant](https://img.shields.io/badge/OpenEnv-compliant-00C853.svg)
-![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
-![HF Spaces Ready](https://img.shields.io/badge/HF%20Spaces-ready-FFCC00.svg)
+StateStrike Security Audit Environment
+An OpenEnv-ready stateful API security environment for real-world vulnerability triage.
 
-**An RL agent that learns to break your API before attackers do.**
+![Python 3.11](https://img.shields.io/badge/Python-3.11-blue)
+![OpenEnv Compliant](https://img.shields.io/badge/OpenEnv-Compliant-00C853)
+![MIT License](https://img.shields.io/badge/License-MIT-green)
+![HF Spaces](https://img.shields.io/badge/HF%20Spaces-Ready-yellow)
 
+## Environment Description and Motivation
+StateStrike models a practical security engineering workflow: systematic API auditing to discover, classify, and chain exploitable behaviors in a production-like service.
 
+Unlike toy game environments, the agent performs genuine tasks security teams run in real engagements:
+- Endpoint reachability mapping
+- Vulnerability probing and classification
+- Stateful exploit-chain execution
 
-## Abstract
-Traditional API fuzzers are overwhelmingly stateless and syntax-oriented. They excel at malformed payload mutation, but many high-impact production failures emerge only after valid, stateful interaction sequences. This mismatch creates blind spots for vulnerabilities that require temporal structure: repeated writes before reads, user-specific data growth, or semantically valid requests that trigger worst-case algorithmic behavior.
+This design creates measurable operational value: better API hardening and earlier detection of latency-amplifying attack paths.
 
-StateStrike frames API fuzzing as a Markov Decision Process (MDP). The agent observes API response state (status codes, latency drift, vulnerability markers), selects actions over endpoint and payload strategy, and receives shaped rewards when it induces measurable infrastructure degradation. This includes ReDoS-class compute spikes, deliberate unindexed aggregation slowdowns, and chain-completion bonuses that bias exploration toward meaningful CRUD trajectories rather than random endpoint spraying.
+## Action Space
+| Field | Type | Description | Values |
+|---|---|---|---|
+| endpoint | EndpointChoice | Target API operation | POST /users, GET /users/{id}, POST /orders, GET /orders, GET /health |
+| payload_strategy | PayloadStrategy | Payload mutation strategy | valid, redos, oversized, malformed |
+| target_user_id | Optional[int] | User context for stateful calls | null or integer user id |
 
-The design draws from stateful REST fuzzing and RL-based vulnerability discovery literature: RESTler (Atlidakis et al., ICSE 2019), TitanFuzz (Deng et al., 2023) for intelligent black-box fuzzing motivation, classical RL formulation from Sutton & Barto (2018), ReDoS impact characterization from Davis et al. (USENIX Security 2018), and OpenEnv architecture patterns (Meta x Hugging Face OpenEnv specification, 2025).
+## Observation Space
+| Field | Type | Description |
+|---|---|---|
+| step | int | Current episode step |
+| endpoint_called | str | Executed endpoint |
+| http_status | int | HTTP response code |
+| latency_ms | float | Request latency in milliseconds |
+| response_body | dict[str, Any] | Parsed response payload |
+| session_order_count | int | Number of orders created in session |
+| endpoints_discovered | list[str] | Reachable endpoints found so far |
+| vulnerabilities_found | list[str] | Confirmed vulnerability labels |
+| task_progress | float | Normalized task completion in [0.0, 1.0] |
 
-## Architecture (ASCII)
-```text
-                         reward / observation
-                   +-------------------------------+
-                   |                               |
-                   v                               |
-+----------------------+      WebSocket /ws    +-------------------------+
-|  Baseline / RL Agent | --------------------> |  StateStrike OpenEnv    |
-|  (agent/runner.py)   | <-------------------- |  Server (reset/step/state)
-+----------------------+                        +-----------+-------------+
-                                                            |
-                                                            | HTTP actions
-                                                            v
-                                                +-------------------------+
-                                                | Vulnerable Honeypot API |
-                                                | (FastAPI + SQLite)      |
-                                                +-----------+-------------+
-                                                            |
-                                                            | telemetry events
-                                                            v
-                                                +-------------------------+
-                                                | telemetry.json + SSE     |
-                                                | + Streamlit Dashboard    |
-                                                +-------------------------+
-```
+## Task Descriptions
+| Task | Difficulty | Max Steps | Success Threshold | Description |
+|---|---|---:|---:|---|
+| endpoint_discovery | easy | 20 | 0.60 | Find all reachable API endpoints |
+| vulnerability_probe | medium | 30 | 0.50 | Find and classify vulnerabilities (redos, db_degradation) |
+| exploit_chain | hard | 60 | 0.75 | Execute full stateful exploit chain with evidence |
 
 ## Reward Function
-StateStrike optimizes the following shaped objective:
+Step reward is normalized to [0.0, 1.0] and shaped by true task progress:
 
-$$
-R_t = \alpha \cdot \log\left(\frac{L_t}{L_{base}}\right) + \beta \cdot S_t + \gamma \cdot E_t - \delta \cdot P_t
-$$
+R_step = clamp(Delta task_score + bonuses - penalties)
 
-Where:
-- $L_t$: response latency at step $t$ (ms)
-- $L_{base}$: rolling 10-step baseline latency
-- $S_t$: state-transition bonus ($+10$ on POST->GET chain completion)
-- $E_t$: exploitation bounty ($+500$ for 5xx or timeout-like latency)
-- $P_t$: fuzzing penalty ($-1$ for fast 400 spam)
-- $\alpha=1.0, \beta=10, \gamma=500, \delta=1$
+Components:
+- Delta task score: max(0, score_t - score_t-1), capped to 0.30
+- +0.05 for a newly discovered endpoint
+- +0.10 for a newly confirmed vulnerability
+- -0.02 for repeated identical no-op action
+- +0.20 terminal completion bonus when task is solved
 
-Why each term exists:
-- Log latency term rewards proportional degradation, limiting reward inflation from absolute latency variance.
-- Chain bonus favors deep logical sequencing, discouraging shallow endpoint roulette.
-- Exploitation bounty creates sparse high-value supervision for meaningful vulnerability discovery.
-- Fuzzing penalty reduces reward hacking from cheap malformed-request spam while preserving costly 400 paths (e.g., ReDoS).
+Anti-hacking properties:
+- One-time vulnerability flags prevent bounty farming
+- Chain cooldown and order-growth guards prevent POST/GET cycling exploits
+- Baseline latency updated via EMA only on successful steps
+- Connection failures produce neutral reward and never corrupt baseline
 
-## Quickstart
-> Compatibility note: local installs require Python 3.11.x due to pinned package versions (notably `pydantic==2.7.1`). If your host uses Python 3.13+, prefer the Docker path below.
-
-### Docker (one-command)
+## Setup Instructions
+### Docker (single command)
 ```bash
-docker compose up --build
+docker build -t statestrike .
+docker run -p 7860:7860 statestrike
 ```
 
-### Manual Python
+### Local Python
 ```bash
 python -m pip install -r requirements.txt
 cp .env.example .env
-
-# terminal 1
 uvicorn honeypot.app:app --host 0.0.0.0 --port 8000
-
-# terminal 2
-python -m statestrike_env.server
-
-# terminal 3
-streamlit run dashboard/app.py --server.port 8501
-
-# terminal 4
-python -m agent.runner --steps 200
+HONEYPOT_URL=http://localhost:8000 uvicorn statestrike_env.environment:app --host 0.0.0.0 --port 7860
+python inference.py
 ```
 
-## OpenEnv Interface Contract
-Environment endpoint: `ws://localhost:8001/ws`
+### HF Space URL
+Set this to your deployed environment Space URL:
+- https://sh4shv4t-statestrike-env.hf.space
 
-WebSocket frame methods:
-- `reset()` -> `StateStrikeObservation`
-- `step(action)` -> `StateStrikeObservation`
-- `state()` -> `StateStrikeState`
+## Baseline Scores
+| Run | endpoint_discovery | vulnerability_probe | exploit_chain | Average |
+|---|---:|---:|---:|---:|
+| baseline-inference | 0.80 | 0.60 | 0.50 | 0.633 |
 
-Core semantics:
-- Per-connection isolated `StateStrikeSession`
-- Episode terminates when `step_count >= 200` or `cumulative_reward < -50`
-- Honeypot outages return synthetic observations (`status=0`, `latency_ms=0`) instead of crashing
+## OpenEnv Compliance Checklist
+- [x] Real-world task framing (security audit)
+- [x] Typed Pydantic action/observation/state models
+- [x] reset(), step(), state(), close() implemented
+- [x] Three graded tasks (easy, medium, hard)
+- [x] Graders produce normalized scores in [0.0, 1.0]
+- [x] Partial-progress reward shaping
+- [x] Root inference.py with [START]/[STEP]/[END] format
+- [x] Root openenv.yaml manifest
+- [x] Single-container Docker runtime with /health and /reset
 
-## Vulnerability Model
-### VULN-1: ReDoS in `POST /users`
-Regex: `^([a-zA-Z0-9]+\s?)*[a-zA-Z0-9]+$` with `re.fullmatch(..., re.DOTALL)`.
-Input pattern `"aaaa...a!"` induces catastrophic backtracking (Davis et al., 2018).
-
-### VULN-2: Stateful DB Degradation in `GET /orders`
-Only reached after sustained sequence pressure (`>20` orders for a user). Endpoint runs intentional $O(n^2)$ in-memory aggregation and adds I/O-like sleep, modeling unindexed analytical degradation. This is explicitly sequence-dependent, reflecting the statefulness emphasized in RESTler-style analysis.
-
-## Evaluation Alignment
-| Hackathon Criterion | Where Addressed |
-|---|---|
-| Task definition clarity | `statestrike_env/models.py`, reward section in this README |
-| Grader correctness | `statestrike_env/grader.py`, `tests/test_grader.py` |
-| Reward logic soundness | `statestrike_env/grader.py` docstring + formula above |
-| OpenEnv compliance | `statestrike_env/server.py`, `statestrike_env/__init__.py` |
-| LLM scoring potential | This README + typed observation/state models |
-| Real-world applicability | `honeypot/app.py` (ReDoS + stateful degradation) |
-| Code quality | Typed signatures, docstrings, logging, constants, tests |
-
-## Project Layout
+## Architecture Diagram
 ```text
-statestrike/
-├── README.md
-├── requirements.txt
-├── .env.example
-├── docker-compose.yml
-├── Dockerfile.honeypot
-├── Dockerfile.env
-├── honeypot/
-├── statestrike_env/
-├── agent/
-├── dashboard/
-├── tests/
-└── scripts/
++-------------------------------+
+| HF Space Container            |
+|  +-------------------------+  |
+|  | Honeypot API :8000      |  |
+|  +-------------------------+  |
+|  | OpenEnv Server :7860    |  |
+|  | /reset /step /state     |  |
+|  +-------------------------+  |
++---------------+---------------+
+                |
+                v
+       inference.py (LLM agent)
 ```
 
 ## License
-MIT License.
-
-## Team
-StateStrike Core Team
-- AI/ML + Systems Architecture: OpenEnv Hackathon submission build
-- Security Research Focus: Stateful API fuzzing for infrastructure degradation discovery
+MIT

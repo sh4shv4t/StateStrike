@@ -25,7 +25,8 @@ services:
       honeypot:
         condition: service_healthy
     environment:
-      HONEYPOT_URL: https://sh4shv4t-statestrike-honeypot.hf.space
+      HONEYPOT_URL: http://honeypot:8000
+      STATESTRIKE_ENV_PORT: 8001
       PYTHONPATH: /app
 
   dashboard:

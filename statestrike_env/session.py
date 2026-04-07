@@ -1,122 +1,86 @@
 from __future__ import annotations
 
-"""Session state manager for per-agent environment isolation."""
-
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import uuid4
 
-from statestrike_env.constants import DEFAULT_BASELINE_LATENCY_MS, MAX_ACTION_HISTORY
-from statestrike_env.models import StateStrikeAction, StateStrikeState
+from statestrike_env.constants import DEFAULT_BASELINE_LATENCY_MS
+from statestrike_env.models import StateStrikeState
 
 
 @dataclass
 class StateStrikeSession:
-    """Mutable per-WebSocket environment session.
-
-    Attributes:
-        session_id: Current episode UUID.
-        step_count: Number of steps taken in current episode.
-        cumulative_reward: Running reward total.
-        order_count: Number of POST /orders actions issued.
-        baseline_latency: Rolling average latency used in reward normalization.
-        action_history: Most recent action history window.
-        triggered_vulns: Vulnerabilities discovered in current episode.
-        redos_bounty_awarded: One-time ReDoS bounty guard.
-        db_degradation_bounty_awarded: One-time DB degradation bounty guard.
-        last_chain_bonus_step: Last step where chain bonus was awarded.
-        post_count_at_last_chain: Order count snapshot at last chain award.
-        baseline_sample_count: Number of successful baseline samples seen.
-    """
-
     session_id: str
+    task_name: str = "endpoint_discovery"
     step_count: int = 0
     cumulative_reward: float = 0.0
     order_count: int = 0
     baseline_latency: float = DEFAULT_BASELINE_LATENCY_MS
-    action_history: list[StateStrikeAction] = field(default_factory=list)
-    triggered_vulns: set[str] = field(default_factory=set)
-    # Anti-hacking: one-time flags so each bounty fires exactly once per episode.
+
+    endpoints_discovered: set[str] = field(default_factory=set)
+    vulnerabilities_found: set[str] = field(default_factory=set)
+    task_specific_state: dict[str, Any] = field(default_factory=dict)
+    steps_history: list[dict[str, Any]] = field(default_factory=list)
+
+    user_created: bool = False
+    previous_task_score: float = 0.0
+    last_action_signature: str | None = None
+
     redos_bounty_awarded: bool = False
     db_degradation_bounty_awarded: bool = False
-    # Anti-hacking: chain bonus can only fire once between meaningful progress windows.
     last_chain_bonus_step: int = -10
     post_count_at_last_chain: int = 0
-    # Baseline integrity: updated only on successful (non-zero latency) steps.
     baseline_sample_count: int = 0
 
     @classmethod
-    def new_session(cls) -> StateStrikeSession:
-        """Create a new initialized session.
+    def new_session(cls, task_name: str = "endpoint_discovery") -> StateStrikeSession:
+        return cls(session_id=str(uuid4()), task_name=task_name)
 
-        Returns:
-            Newly initialized StateStrikeSession instance.
-        """
-
-        return cls(session_id=str(uuid4()))
-
-    def reset(self, baseline_latency: float = DEFAULT_BASELINE_LATENCY_MS) -> None:
-        """Reset session in-place for a new episode.
-
-        Args:
-            baseline_latency: Fresh baseline latency in milliseconds.
-        """
-
+    def reset(
+        self,
+        task_name: str,
+        baseline_latency: float = DEFAULT_BASELINE_LATENCY_MS,
+    ) -> None:
         self.session_id = str(uuid4())
+        self.task_name = task_name
         self.step_count = 0
         self.cumulative_reward = 0.0
         self.order_count = 0
         self.baseline_latency = baseline_latency
-        self.action_history.clear()
-        self.triggered_vulns.clear()
+
+        self.endpoints_discovered.clear()
+        self.vulnerabilities_found.clear()
+        self.task_specific_state = {}
+        self.steps_history.clear()
+
+        self.user_created = False
+        self.previous_task_score = 0.0
+        self.last_action_signature = None
+
         self.redos_bounty_awarded = False
         self.db_degradation_bounty_awarded = False
         self.last_chain_bonus_step = -10
         self.post_count_at_last_chain = 0
         self.baseline_sample_count = 1 if baseline_latency > 0 else 0
 
-    def record_latency(self, latency_ms: float) -> float:
-        """Update baseline latency using EMA from successful samples.
-
-        Args:
-            latency_ms: Observed latency for the current step.
-
-        Returns:
-            Updated baseline latency.
-        """
-
-        sample = max(latency_ms, 1.0)
-        alpha_ema = 2.0 / (10 + 1)
-        if self.baseline_sample_count == 0:
-            self.baseline_latency = sample
-        else:
-            self.baseline_latency = alpha_ema * sample + (1 - alpha_ema) * self.baseline_latency
-        self.baseline_sample_count += 1
-        return self.baseline_latency
-
-    def append_action(self, action: StateStrikeAction) -> None:
-        """Append action while enforcing history length constraints.
-
-        Args:
-            action: Action to append.
-        """
-
-        self.action_history.append(action)
-        if len(self.action_history) > MAX_ACTION_HISTORY:
-            self.action_history.pop(0)
-
     def as_state(self) -> StateStrikeState:
-        """Convert mutable session internals to external state model.
-
-        Returns:
-            Immutable API-safe state representation.
-        """
-
         return StateStrikeState(
             session_id=self.session_id,
+            task_name=self.task_name,
             step_count=self.step_count,
             cumulative_reward=self.cumulative_reward,
             order_count=self.order_count,
             baseline_latency_ms=self.baseline_latency,
-            action_history=list(self.action_history),
-            triggered_vulns=sorted(self.triggered_vulns),
+            endpoints_discovered=sorted(self.endpoints_discovered),
+            vulnerabilities_found=sorted(self.vulnerabilities_found),
+            task_specific_state=dict(self.task_specific_state),
         )
+
+    def as_grader_state(self) -> dict[str, Any]:
+        return {
+            "endpoints_discovered": sorted(self.endpoints_discovered),
+            "vulnerabilities_found": sorted(self.vulnerabilities_found),
+            "steps_history": list(self.steps_history),
+            "order_count": self.order_count,
+            "user_created": self.user_created,
+        }
