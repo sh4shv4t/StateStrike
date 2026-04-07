@@ -1,11 +1,13 @@
 ## StateStrike
 
-**An RL agent that learns to break your API before attackers do.**
-
 ![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
 ![OpenEnv Compliant](https://img.shields.io/badge/OpenEnv-compliant-00C853.svg)
 ![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
 ![HF Spaces Ready](https://img.shields.io/badge/HF%20Spaces-ready-FFCC00.svg)
+
+**An RL agent that learns to break your API before attackers do.**
+
+
 
 ## Abstract
 Traditional API fuzzers are overwhelmingly stateless and syntax-oriented. They excel at malformed payload mutation, but many high-impact production failures emerge only after valid, stateful interaction sequences. This mismatch creates blind spots for vulnerabilities that require temporal structure: repeated writes before reads, user-specific data growth, or semantically valid requests that trigger worst-case algorithmic behavior.
