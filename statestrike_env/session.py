@@ -2,12 +2,10 @@ from __future__ import annotations
 
 """Session state manager for per-agent environment isolation."""
 
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque
 from uuid import uuid4
 
-from statestrike_env.constants import BASELINE_WINDOW, DEFAULT_BASELINE_LATENCY_MS, MAX_ACTION_HISTORY
+from statestrike_env.constants import DEFAULT_BASELINE_LATENCY_MS, MAX_ACTION_HISTORY
 from statestrike_env.models import StateStrikeAction, StateStrikeState
 
 
@@ -23,7 +21,11 @@ class StateStrikeSession:
         baseline_latency: Rolling average latency used in reward normalization.
         action_history: Most recent action history window.
         triggered_vulns: Vulnerabilities discovered in current episode.
-        latency_window: Sliding window for baseline computation.
+        redos_bounty_awarded: One-time ReDoS bounty guard.
+        db_degradation_bounty_awarded: One-time DB degradation bounty guard.
+        last_chain_bonus_step: Last step where chain bonus was awarded.
+        post_count_at_last_chain: Order count snapshot at last chain award.
+        baseline_sample_count: Number of successful baseline samples seen.
     """
 
     session_id: str
@@ -33,7 +35,14 @@ class StateStrikeSession:
     baseline_latency: float = DEFAULT_BASELINE_LATENCY_MS
     action_history: list[StateStrikeAction] = field(default_factory=list)
     triggered_vulns: set[str] = field(default_factory=set)
-    latency_window: Deque[float] = field(default_factory=lambda: deque(maxlen=BASELINE_WINDOW))
+    # Anti-hacking: one-time flags so each bounty fires exactly once per episode.
+    redos_bounty_awarded: bool = False
+    db_degradation_bounty_awarded: bool = False
+    # Anti-hacking: chain bonus can only fire once between meaningful progress windows.
+    last_chain_bonus_step: int = -10
+    post_count_at_last_chain: int = 0
+    # Baseline integrity: updated only on successful (non-zero latency) steps.
+    baseline_sample_count: int = 0
 
     @classmethod
     def new_session(cls) -> StateStrikeSession:
@@ -59,11 +68,14 @@ class StateStrikeSession:
         self.baseline_latency = baseline_latency
         self.action_history.clear()
         self.triggered_vulns.clear()
-        self.latency_window.clear()
-        self.latency_window.append(baseline_latency)
+        self.redos_bounty_awarded = False
+        self.db_degradation_bounty_awarded = False
+        self.last_chain_bonus_step = -10
+        self.post_count_at_last_chain = 0
+        self.baseline_sample_count = 1 if baseline_latency > 0 else 0
 
     def record_latency(self, latency_ms: float) -> float:
-        """Update rolling baseline latency.
+        """Update baseline latency using EMA from successful samples.
 
         Args:
             latency_ms: Observed latency for the current step.
@@ -72,8 +84,13 @@ class StateStrikeSession:
             Updated baseline latency.
         """
 
-        self.latency_window.append(max(latency_ms, 1.0))
-        self.baseline_latency = sum(self.latency_window) / len(self.latency_window)
+        sample = max(latency_ms, 1.0)
+        alpha_ema = 2.0 / (10 + 1)
+        if self.baseline_sample_count == 0:
+            self.baseline_latency = sample
+        else:
+            self.baseline_latency = alpha_ema * sample + (1 - alpha_ema) * self.baseline_latency
+        self.baseline_sample_count += 1
         return self.baseline_latency
 
     def append_action(self, action: StateStrikeAction) -> None:
