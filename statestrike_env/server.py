@@ -23,7 +23,6 @@ except ImportError:  # pragma: no cover - optional import for compatibility sign
 from statestrike_env.constants import (
     ACTION_TIMEOUT_SECONDS,
     DEFAULT_BASELINE_LATENCY_MS,
-    EARLY_TERMINATION_REWARD,
     EPISODE_LENGTH,
     RewardConstants,
 )
@@ -158,24 +157,13 @@ class StateStrikeEnvironment:
             info={"response": body},
         )
 
-        if status == 0:
-            # Connection failure: return neutral observation, reward=0
-            # Do NOT penalize - agent had no agency over network failure.
-            reward = 0.0
-            breakdown = {
-                "latency_reward": 0.0,
-                "chain_bonus": 0.0,
-                "exploit_bounty": 0.0,
-                "fuzz_penalty": 0.0,
-                "total": 0.0,
-                "error": "connection_failed",
-            }
-        else:
-            reward, breakdown = compute_reward(provisional, session, self.constants)
-            session.cumulative_reward += reward
-            session.record_latency(latency_ms if latency_ms > 0 else session.baseline_latency)
+        reward, breakdown = compute_reward(provisional, session, self.constants)
+        session.cumulative_reward += reward
 
-        done = session.step_count >= EPISODE_LENGTH or session.cumulative_reward < EARLY_TERMINATION_REWARD
+        done = (
+            session.step_count >= EPISODE_LENGTH
+            or session.cumulative_reward < self.constants.EARLY_TERMINATION_REWARD
+        )
         obs = StateStrikeObservation(
             step=session.step_count,
             action_taken=action,
