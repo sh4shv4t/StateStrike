@@ -89,9 +89,11 @@ Set this to your deployed environment Space URL:
 - https://sh4shv4t-statestrike-env.hf.space
 
 ## Baseline Scores
-| Run | endpoint_discovery | vulnerability_probe | exploit_chain | Average |
-|---|---:|---:|---:|---:|
-| baseline-inference | 0.80 | 0.60 | 0.50 | 0.633 |
+| Task | Baseline Score | Model |
+|------|---------------:|-------|
+| endpoint_discovery | 0.600 | Qwen/Qwen2.5-72B-Instruct |
+| vulnerability_probe | 0.400 | Qwen/Qwen2.5-72B-Instruct |
+| exploit_chain | 0.000 | Qwen/Qwen2.5-72B-Instruct |
 
 ## OpenEnv Compliance Checklist
 - [x] Real-world task framing (security audit)
