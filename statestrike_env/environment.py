@@ -11,7 +11,6 @@ import httpx
 from fastapi import Body, FastAPI
 
 from statestrike_env.constants import RewardConstants
-from statestrike_env.grader import compute_task_reward, compute_task_score
 from statestrike_env.models import (
     EndpointChoice,
     PayloadStrategy,
@@ -22,6 +21,18 @@ from statestrike_env.models import (
 )
 from statestrike_env.session import StateStrikeSession
 from statestrike_env.tasks import TASK_REGISTRY
+
+
+def _compute_current_task_score(session: StateStrikeSession, task_name: str) -> float:
+    _, grader = TASK_REGISTRY[task_name]
+    state_dict = {
+        "endpoints_discovered": list(session.endpoints_discovered),
+        "vulnerabilities_found": list(session.triggered_vulns),
+        "steps_history": session.steps_history,
+        "user_created": session.user_created,
+        "order_count": session.order_count,
+    }
+    return float(grader.score(state_dict))
 
 
 class StateStrikeEnv:
@@ -96,47 +107,47 @@ class StateStrikeEnv:
             latency_ms=latency_ms,
             response_body={"status": "reset"},
             session_order_count=0,
-            endpoints_discovered=[],
-            vulnerabilities_found=[],
-            task_progress=0.0,
+            endpoints_discovered=list(self.session.endpoints_discovered),
+            vulnerabilities_found=list(self.session.triggered_vulns),
+            task_progress=_compute_current_task_score(self.session, self.session.task_name),
         )
         return StepResult(observation=observation, reward=0.0, done=False, info={"task": task_name})
 
     async def step(self, action: StateStrikeAction) -> StepResult:
-        method, path, params, payload = self._translate_action(action)
+        prev_score = _compute_current_task_score(self.session, self.session.task_name)
+        endpoint_before = len(self.session.endpoints_discovered)
+        vulns_before = len(self.session.triggered_vulns)
+
+        method, path, params, payload = self._translate_action(action, self.session)
         status, latency_ms, body = await self._request_honeypot(method, path, params=params, payload=payload)
 
-        endpoint_value = action.endpoint if isinstance(action.endpoint, str) else action.endpoint.value
+        endpoint_str = action.endpoint if isinstance(action.endpoint, str) else action.endpoint.value
         strategy_value = (
             action.payload_strategy if isinstance(action.payload_strategy, str) else action.payload_strategy.value
         )
 
         self.session.step_count += 1
-        if endpoint_value == EndpointChoice.POST_ORDERS.value and status in (200, 201):
+
+        if status in (200, 201, 400, 422):
+            self.session.endpoints_discovered.add(endpoint_str)
+
+        if endpoint_str == EndpointChoice.POST_ORDERS.value and status in (200, 201):
             self.session.order_count += 1
 
-        endpoint_name = endpoint_value
-        new_endpoint = False
-        if status > 0 and endpoint_name not in self.session.endpoints_discovered:
-            self.session.endpoints_discovered.add(endpoint_name)
-            new_endpoint = True
-
-        signature = f"{endpoint_value}|{strategy_value}|{action.target_user_id}"
-        repeated_action = signature == self.session.last_action_signature
-        self.session.last_action_signature = signature
-
-        new_vulnerability = False
+        action_signature = f"{endpoint_str}|{strategy_value}|{action.target_user_id}"
+        repeated_action = action_signature == self.session.last_action_str
+        self.session.last_action_str = action_signature
+        self.session.last_action_signature = action_signature
 
         if (
             not self.session.redos_bounty_awarded
-            and endpoint_value == EndpointChoice.POST_USERS.value
+            and endpoint_str == EndpointChoice.POST_USERS.value
             and strategy_value == PayloadStrategy.REDOS_ATTACK.value
             and status == 400
             and latency_ms > self.constants.REDOS_LATENCY_THRESHOLD_MS
         ):
             self.session.redos_bounty_awarded = True
-            self.session.vulnerabilities_found.add("redos")
-            new_vulnerability = True
+            self.session.triggered_vulns.add("redos")
 
         chain_cooldown_ready = (
             self.session.step_count - self.session.last_chain_bonus_step
@@ -144,30 +155,32 @@ class StateStrikeEnv:
         chain_progressed = self.session.order_count > self.session.post_count_at_last_chain
         if (
             not self.session.db_degradation_bounty_awarded
-            and endpoint_value == EndpointChoice.GET_ORDERS.value
+            and endpoint_str == EndpointChoice.GET_ORDERS.value
             and self.session.order_count >= self.constants.CHAIN_REQUIRED_ORDERS
             and latency_ms > self.constants.DB_TIMEOUT_THRESHOLD_MS
             and chain_cooldown_ready
             and chain_progressed
         ):
             self.session.db_degradation_bounty_awarded = True
-            self.session.vulnerabilities_found.add("db_degradation")
+            self.session.triggered_vulns.add("db_degradation")
             self.session.last_chain_bonus_step = self.session.step_count
             self.session.post_count_at_last_chain = self.session.order_count
-            new_vulnerability = True
 
         if (
-            endpoint_value == EndpointChoice.POST_USERS.value
+            endpoint_str == EndpointChoice.POST_USERS.value
             and strategy_value == PayloadStrategy.VALID.value
             and status in (200, 201)
         ):
             self.session.user_created = True
+            if isinstance(body, dict):
+                user_id = body.get("id")
+                if isinstance(user_id, int):
+                    self.session.user_id = user_id
 
         self.session.steps_history.append(
             {
-                "endpoint": endpoint_value,
+                "endpoint": endpoint_str,
                 "payload_strategy": strategy_value,
-                "target_user_id": action.target_user_id,
                 "http_status": status,
                 "latency_ms": latency_ms,
             }
@@ -175,37 +188,55 @@ class StateStrikeEnv:
         if len(self.session.steps_history) > 200:
             self.session.steps_history.pop(0)
 
-        self.session.task_specific_state["new_endpoint_discovered"] = new_endpoint
-        self.session.task_specific_state["new_vulnerability_found"] = new_vulnerability
+        new_endpoint_found = len(self.session.endpoints_discovered) > endpoint_before
+        new_vulnerability_found = len(self.session.triggered_vulns) > vulns_before
+        self.session.task_specific_state["new_endpoint_discovered"] = new_endpoint_found
+        self.session.task_specific_state["new_vulnerability_found"] = new_vulnerability_found
         self.session.task_specific_state["repeated_action"] = repeated_action
 
-        task_score = compute_task_score(self.session, self.session.task_name)
+        current_score = _compute_current_task_score(self.session, self.session.task_name)
         observation = StateStrikeObservation(
             step=self.session.step_count,
-            endpoint_called=endpoint_value,
+            endpoint_called=endpoint_str,
             http_status=status,
             latency_ms=latency_ms,
             response_body=body,
             session_order_count=self.session.order_count,
             endpoints_discovered=sorted(self.session.endpoints_discovered),
-            vulnerabilities_found=sorted(self.session.vulnerabilities_found),
-            task_progress=task_score,
+            vulnerabilities_found=sorted(self.session.triggered_vulns),
+            task_progress=current_score,
         )
-
-        reward, breakdown = compute_task_reward(
-            observation,
-            self.session,
-            self.session.task_name,
-            self.constants,
-        )
-        self.session.cumulative_reward += reward
 
         task_cfg, _ = TASK_REGISTRY[self.session.task_name]
-        done = self.session.step_count >= task_cfg.max_steps or task_score >= task_cfg.success_threshold
+        done = self.session.step_count >= task_cfg.max_steps or current_score >= task_cfg.success_threshold
+
+        score_delta = max(0.0, current_score - prev_score)
+        score_delta = min(score_delta, self.constants.STEP_DELTA_MAX)
+
+        step_reward = score_delta
+        step_reward += self.constants.NEW_ENDPOINT_BONUS if new_endpoint_found else 0.0
+        step_reward += self.constants.NEW_VULNERABILITY_BONUS if new_vulnerability_found else 0.0
+        step_reward -= self.constants.REPEATED_ACTION_PENALTY if repeated_action else 0.0
+        if done and current_score >= task_cfg.success_threshold:
+            step_reward += self.constants.TERMINAL_BONUS
+
+        step_reward = round(min(max(step_reward, 0.0), 1.0), 4)
+        self.session.previous_task_score = max(self.session.previous_task_score, current_score)
+        self.session.cumulative_reward += step_reward
+
+        breakdown = {
+            "score_delta": round(score_delta, 4),
+            "new_endpoint_bonus": self.constants.NEW_ENDPOINT_BONUS if new_endpoint_found else 0.0,
+            "new_vulnerability_bonus": self.constants.NEW_VULNERABILITY_BONUS if new_vulnerability_found else 0.0,
+            "repeat_penalty": -self.constants.REPEATED_ACTION_PENALTY if repeated_action else 0.0,
+            "terminal_bonus": self.constants.TERMINAL_BONUS if (done and current_score >= task_cfg.success_threshold) else 0.0,
+            "total": step_reward,
+            "task_score": round(current_score, 4),
+        }
 
         return StepResult(
             observation=observation,
-            reward=reward,
+            reward=step_reward,
             done=done,
             info={
                 "reward_breakdown": breakdown,
@@ -228,12 +259,13 @@ class StateStrikeEnv:
     def _translate_action(
         self,
         action: StateStrikeAction,
+        session: StateStrikeSession,
     ) -> tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]:
         endpoint_value = action.endpoint if isinstance(action.endpoint, str) else action.endpoint.value
         strategy_value = (
             action.payload_strategy if isinstance(action.payload_strategy, str) else action.payload_strategy.value
         )
-        target_user_id = action.target_user_id or 1
+        target_user_id = action.target_user_id if action.target_user_id is not None else (session.user_id or 1)
 
         if endpoint_value == EndpointChoice.POST_USERS.value:
             return "POST", "/users", None, {"email": self._email_for_strategy(strategy_value)}

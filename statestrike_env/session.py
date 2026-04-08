@@ -23,8 +23,10 @@ class StateStrikeSession:
     steps_history: list[dict[str, Any]] = field(default_factory=list)
 
     user_created: bool = False
+    user_id: int | None = None
     previous_task_score: float = 0.0
     last_action_signature: str | None = None
+    last_action_str: str = ""
 
     redos_bounty_awarded: bool = False
     db_degradation_bounty_awarded: bool = False
@@ -54,8 +56,10 @@ class StateStrikeSession:
         self.steps_history.clear()
 
         self.user_created = False
+        self.user_id = None
         self.previous_task_score = 0.0
         self.last_action_signature = None
+        self.last_action_str = ""
 
         self.redos_bounty_awarded = False
         self.db_degradation_bounty_awarded = False
@@ -84,3 +88,8 @@ class StateStrikeSession:
             "order_count": self.order_count,
             "user_created": self.user_created,
         }
+
+    @property
+    def triggered_vulns(self) -> set[str]:
+        """Backward-compatible alias for vulnerability tracking."""
+        return self.vulnerabilities_found

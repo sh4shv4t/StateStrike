@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import textwrap
 from typing import List, Optional
 
@@ -55,36 +56,122 @@ TASK_CONFIGS = {
 SYSTEM_PROMPTS = {
     "endpoint_discovery": textwrap.dedent(
         """
-        You are a security agent probing an API to discover all available endpoints.
-        Known endpoints to try: POST /users, GET /users/{id}, POST /orders, GET /orders, GET /health
-        At each step, choose ONE endpoint to call and a payload strategy.
-        Reply with a JSON object: {"endpoint": "POST /users", "payload_strategy": "valid", "target_user_id": null}
-        Try each endpoint at least once. Vary payload strategies to confirm reachability.
+        You are a security agent discovering API endpoints. Try each endpoint ONCE.
+        VALID endpoint values (use EXACTLY as written):
+          "POST /users", "GET /users/{id}", "POST /orders", "GET /orders", "GET /health"
+        VALID payload_strategy values: "valid", "redos", "oversized", "malformed"
+        Reply with ONLY a JSON object like:
+        {"endpoint": "POST /users", "payload_strategy": "valid", "target_user_id": null}
+        Do NOT repeat endpoints you have already tried.
         """
     ).strip(),
     "vulnerability_probe": textwrap.dedent(
         """
-        You are a security agent looking for vulnerabilities in an API.
-        Two vulnerabilities exist:
-        1. ReDoS: POST /users with payload_strategy "redos" causes CPU spike (latency > 1500ms, returns 400)
-        2. DB Degradation: GET /orders after 20+ orders causes slow query (latency > 800ms)
-        Reply with JSON: {"endpoint": "POST /users", "payload_strategy": "redos", "target_user_id": null}
-        Valid endpoint values: "POST /users", "GET /users/{id}", "POST /orders", "GET /orders", "GET /health"
-        Valid strategies: "valid", "redos", "oversized", "malformed"
+        You are a security agent finding API vulnerabilities.
+        VALID endpoint values (use EXACTLY):
+          "POST /users", "GET /users/{id}", "POST /orders", "GET /orders", "GET /health"
+        VALID payload_strategy values: "valid", "redos", "oversized", "malformed"
+        Two vulnerabilities:
+        1. ReDoS: call "POST /users" with payload_strategy "redos"
+        2. DB slow path: first call "POST /orders" 21 times with "valid", then "GET /orders"
+        Reply with ONLY JSON: {"endpoint": "POST /users", "payload_strategy": "redos", "target_user_id": null}
         """
     ).strip(),
     "exploit_chain": textwrap.dedent(
         """
-        You are a security agent executing a full exploit chain. Complete these in order:
-        1. Create a user: POST /users with payload_strategy "valid"
-        2. Create 21 orders: POST /orders with payload_strategy "valid", target_user_id=<user_id from step 1>
-        3. Trigger slow query: GET /orders with target_user_id set
-        4. Trigger ReDoS: POST /users with payload_strategy "redos"
-        Track your progress. Each step builds on the previous.
-        Reply with JSON: {"endpoint": "POST /orders", "payload_strategy": "valid", "target_user_id": 1}
+        You are a security agent executing a 4-step exploit chain.
+        VALID endpoint values (use EXACTLY):
+          "POST /users", "GET /users/{id}", "POST /orders", "GET /orders", "GET /health"
+        VALID payload_strategy values: "valid", "redos", "oversized", "malformed"
+        Follow this EXACT sequence:
+          Step 1: {"endpoint": "POST /users", "payload_strategy": "valid", "target_user_id": null}
+          Steps 2-22: {"endpoint": "POST /orders", "payload_strategy": "valid", "target_user_id": <id from step 1>}
+          Step 23: {"endpoint": "GET /orders", "payload_strategy": "valid", "target_user_id": <same id>}
+          Step 24+: {"endpoint": "POST /users", "payload_strategy": "redos", "target_user_id": null}
+        The observation tells you the current order_count and user_created status.
+        Reply with ONLY the JSON for your NEXT action.
         """
     ).strip(),
 }
+
+ENDPOINT_ALIASES = {
+    "GET /users/{user_id}": "GET /users/{id}",
+    "GET /users/:id": "GET /users/{id}",
+    "GET /user": "GET /users/{id}",
+}
+
+STRATEGY_ALIASES = {
+    "none": "valid",
+    "attack": "redos",
+    "normal": "valid",
+    "invalid": "malformed",
+}
+
+
+def build_user_prompt(step: int, last_obs: dict, history: list[str], task_name: str) -> str:
+    history_block = "\n".join(history[-4:]) if history else "None"
+
+    order_count = last_obs.get("session_order_count", 0)
+    endpoints_found = last_obs.get("endpoints_discovered", [])
+    vulns_found = last_obs.get("vulnerabilities_found", [])
+    task_progress = last_obs.get("task_progress", 0.0)
+
+    guidance = ""
+    if task_name == "endpoint_discovery":
+        remaining = [
+            e
+            for e in [
+                "POST /users",
+                "GET /users/{id}",
+                "POST /orders",
+                "GET /orders",
+                "GET /health",
+            ]
+            if e not in endpoints_found
+        ]
+        guidance = f"Endpoints not yet tried: {remaining}"
+    elif task_name == "vulnerability_probe":
+        guidance = f"Vulns found so far: {vulns_found}. Order count: {order_count}."
+    elif task_name == "exploit_chain":
+        guidance = (
+            f"order_count={order_count}/21, "
+            f"user_created={'POST /users' in endpoints_found}, "
+            f"vulns={vulns_found}. "
+            f"If order_count < 21, keep doing POST /orders. "
+            f"If order_count >= 21 and 'db_degradation' not in vulns, do GET /orders. "
+            f"If 'redos' not in vulns, do POST /users with redos."
+        )
+
+    return textwrap.dedent(
+        f"""
+        Step: {step}
+        Task progress: {task_progress:.1%}
+        {guidance}
+        Last response: status={last_obs.get('http_status')} latency={last_obs.get('latency_ms', 0):.0f}ms
+        History:
+        {history_block}
+        What is your next action? Reply with JSON only.
+        """
+    ).strip()
+
+
+def _normalize_action_data(data: dict, task_name: str, created_user_id: int | None) -> dict:
+    endpoint = str(data.get("endpoint", "")).strip()
+    if re.fullmatch(r"GET\s+/users/\d+", endpoint):
+        endpoint = "GET /users/{id}"
+    endpoint = ENDPOINT_ALIASES.get(endpoint, endpoint)
+    if endpoint:
+        data["endpoint"] = endpoint
+
+    strategy = str(data.get("payload_strategy", "")).strip().lower()
+    if strategy:
+        data["payload_strategy"] = STRATEGY_ALIASES.get(strategy, strategy)
+
+    if task_name == "exploit_chain" and created_user_id:
+        if data.get("endpoint") in ("POST /orders", "GET /orders"):
+            data["target_user_id"] = created_user_id
+
+    return data
 
 
 def get_agent_action(
@@ -93,18 +180,10 @@ def get_agent_action(
     step: int,
     last_obs: dict,
     history: List[str],
+    created_user_id: int | None = None,
 ) -> StateStrikeAction:
     system = SYSTEM_PROMPTS[task_name]
-    history_block = "\n".join(history[-5:]) if history else "None"
-    user_msg = textwrap.dedent(
-        f"""
-        Step: {step}
-        Last observation: {json.dumps(last_obs, indent=2)}
-        Recent history:
-        {history_block}
-        What is your next action? Reply with JSON only.
-        """
-    ).strip()
+    user_msg = build_user_prompt(step=step, last_obs=last_obs, history=history, task_name=task_name)
 
     fallback = StateStrikeAction(
         endpoint=EndpointChoice.HEALTH,
@@ -122,8 +201,9 @@ def get_agent_action(
             max_tokens=100,
         )
         text = (completion.choices[0].message.content or "").strip()
-        text = text.removeprefix("```json").removesuffix("```").strip()
+        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         data = json.loads(text)
+        data = _normalize_action_data(data, task_name=task_name, created_user_id=created_user_id)
         return StateStrikeAction(**data)
     except Exception as exc:
         print(f"[DEBUG] Action parse failed: {exc}", flush=True)
@@ -144,6 +224,7 @@ async def run_task(
     score = 0.0
     success = False
     history: List[str] = []
+    created_user_id: int | None = None
 
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
@@ -156,7 +237,14 @@ async def run_task(
             if result.done:
                 break
 
-            action = get_agent_action(client, task_name, step, last_obs_dict, history)
+            action = get_agent_action(
+                client,
+                task_name,
+                step,
+                last_obs_dict,
+                history,
+                created_user_id=created_user_id,
+            )
             action_str = f"{action.endpoint}+{action.payload_strategy}"
 
             result = await env.step(action)
@@ -168,6 +256,12 @@ async def run_task(
             rewards.append(reward)
             steps_taken = step
             last_obs_dict = obs.model_dump()
+
+            if task_name == "exploit_chain":
+                body = obs.response_body or {}
+                maybe_id = body.get("id") if isinstance(body, dict) else None
+                if isinstance(maybe_id, int) and created_user_id is None:
+                    created_user_id = maybe_id
 
             log_step(step=step, action=action_str, reward=reward, done=done, error=error)
             history.append(
