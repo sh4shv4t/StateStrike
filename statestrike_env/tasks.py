@@ -50,7 +50,7 @@ TASK_VULNERABILITY_PROBE = TaskConfig(
 
 
 class VulnerabilityProbeGrader:
-    REDOS_LATENCY_THRESHOLD_MS = 1500.0
+    REDOS_LATENCY_THRESHOLD_MS = 500.0
     DB_LATENCY_THRESHOLD_MS = 800.0
 
     def score(self, session_state: dict[str, Any]) -> float:

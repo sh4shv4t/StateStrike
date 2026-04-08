@@ -74,6 +74,7 @@ SYSTEM_PROMPTS = {
         Two vulnerabilities:
         1. ReDoS: call "POST /users" with payload_strategy "redos"
         2. DB slow path: first call "POST /orders" 21 times with "valid", then "GET /orders"
+        Once you have confirmed ReDoS (latency > 500ms on POST /users redos), switch to building orders: do POST /orders 21 times, then GET /orders.
         Reply with ONLY JSON: {"endpoint": "POST /users", "payload_strategy": "redos", "target_user_id": null}
         """
     ).strip(),

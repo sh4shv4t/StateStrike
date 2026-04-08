@@ -45,7 +45,8 @@ class StateStrikeEnv:
     ) -> None:
         self.honeypot_url = (honeypot_url or os.getenv("HONEYPOT_URL", "http://localhost:8000")).rstrip("/")
         self.constants = constants or RewardConstants()
-        self.session = StateStrikeSession.new_session("endpoint_discovery")
+        self._session = StateStrikeSession.new_session("endpoint_discovery")
+        self.session = self._session
         self._managed_container_id: str | None = None
 
     @classmethod
@@ -98,7 +99,7 @@ class StateStrikeEnv:
 
         status, latency_ms, _ = await self._request_honeypot("GET", "/health")
         baseline = latency_ms if latency_ms > 0 else self.constants.DEFAULT_BASELINE_LATENCY_MS
-        self.session.reset(task_name=task_name, baseline_latency=baseline)
+        self._session.reset(task_name=task_name, baseline_latency=baseline)
 
         observation = StateStrikeObservation(
             step=0,
@@ -107,18 +108,19 @@ class StateStrikeEnv:
             latency_ms=latency_ms,
             response_body={"status": "reset"},
             session_order_count=0,
-            endpoints_discovered=list(self.session.endpoints_discovered),
-            vulnerabilities_found=list(self.session.triggered_vulns),
-            task_progress=_compute_current_task_score(self.session, self.session.task_name),
+            endpoints_discovered=list(self._session.endpoints_discovered),
+            vulnerabilities_found=list(self._session.triggered_vulns),
+            task_progress=_compute_current_task_score(self._session, self._session.task_name),
         )
         return StepResult(observation=observation, reward=0.0, done=False, info={"task": task_name})
 
     async def step(self, action: StateStrikeAction) -> StepResult:
-        prev_score = _compute_current_task_score(self.session, self.session.task_name)
-        endpoint_before = len(self.session.endpoints_discovered)
-        vulns_before = len(self.session.triggered_vulns)
+        session = self._session
+        prev_score = _compute_current_task_score(session, session.task_name)
+        endpoint_before = len(session.endpoints_discovered)
+        vulns_before = len(session.triggered_vulns)
 
-        method, path, params, payload = self._translate_action(action, self.session)
+        method, path, params, payload = self._translate_action(action, session)
         status, latency_ms, body = await self._request_honeypot(method, path, params=params, payload=payload)
 
         endpoint_str = action.endpoint if isinstance(action.endpoint, str) else action.endpoint.value
@@ -126,58 +128,57 @@ class StateStrikeEnv:
             action.payload_strategy if isinstance(action.payload_strategy, str) else action.payload_strategy.value
         )
 
-        self.session.step_count += 1
+        session.step_count += 1
 
-        if status in (200, 201, 400, 422):
-            self.session.endpoints_discovered.add(endpoint_str)
+        if status in (200, 201, 400, 404, 422) and endpoint_str not in session.endpoints_discovered:
+            session.endpoints_discovered.add(endpoint_str)
 
         if endpoint_str == EndpointChoice.POST_ORDERS.value and status in (200, 201):
-            self.session.order_count += 1
+            session.order_count += 1
 
         action_signature = f"{endpoint_str}|{strategy_value}|{action.target_user_id}"
-        repeated_action = action_signature == self.session.last_action_str
-        self.session.last_action_str = action_signature
-        self.session.last_action_signature = action_signature
+        repeated_action = action_signature == session.last_action_str
+        session.last_action_str = action_signature
+        session.last_action_signature = action_signature
 
         if (
-            not self.session.redos_bounty_awarded
+            not session.redos_bounty_awarded
             and endpoint_str == EndpointChoice.POST_USERS.value
             and strategy_value == PayloadStrategy.REDOS_ATTACK.value
-            and status == 400
             and latency_ms > self.constants.REDOS_LATENCY_THRESHOLD_MS
         ):
-            self.session.redos_bounty_awarded = True
-            self.session.triggered_vulns.add("redos")
+            session.redos_bounty_awarded = True
+            session.triggered_vulns.add("redos")
 
         chain_cooldown_ready = (
-            self.session.step_count - self.session.last_chain_bonus_step
+            session.step_count - session.last_chain_bonus_step
         ) >= self.constants.CHAIN_COOLDOWN_STEPS
-        chain_progressed = self.session.order_count > self.session.post_count_at_last_chain
+        chain_progressed = session.order_count > session.post_count_at_last_chain
         if (
-            not self.session.db_degradation_bounty_awarded
+            not session.db_degradation_bounty_awarded
             and endpoint_str == EndpointChoice.GET_ORDERS.value
-            and self.session.order_count >= self.constants.CHAIN_REQUIRED_ORDERS
+            and session.order_count >= self.constants.CHAIN_REQUIRED_ORDERS
             and latency_ms > self.constants.DB_TIMEOUT_THRESHOLD_MS
             and chain_cooldown_ready
             and chain_progressed
         ):
-            self.session.db_degradation_bounty_awarded = True
-            self.session.triggered_vulns.add("db_degradation")
-            self.session.last_chain_bonus_step = self.session.step_count
-            self.session.post_count_at_last_chain = self.session.order_count
+            session.db_degradation_bounty_awarded = True
+            session.triggered_vulns.add("db_degradation")
+            session.last_chain_bonus_step = session.step_count
+            session.post_count_at_last_chain = session.order_count
 
         if (
             endpoint_str == EndpointChoice.POST_USERS.value
             and strategy_value == PayloadStrategy.VALID.value
             and status in (200, 201)
         ):
-            self.session.user_created = True
+            session.user_created = True
             if isinstance(body, dict):
                 user_id = body.get("id")
                 if isinstance(user_id, int):
-                    self.session.user_id = user_id
+                    session.user_id = user_id
 
-        self.session.steps_history.append(
+        session.steps_history.append(
             {
                 "endpoint": endpoint_str,
                 "payload_strategy": strategy_value,
@@ -185,30 +186,30 @@ class StateStrikeEnv:
                 "latency_ms": latency_ms,
             }
         )
-        if len(self.session.steps_history) > 200:
-            self.session.steps_history.pop(0)
+        if len(session.steps_history) > 200:
+            session.steps_history.pop(0)
 
-        new_endpoint_found = len(self.session.endpoints_discovered) > endpoint_before
-        new_vulnerability_found = len(self.session.triggered_vulns) > vulns_before
-        self.session.task_specific_state["new_endpoint_discovered"] = new_endpoint_found
-        self.session.task_specific_state["new_vulnerability_found"] = new_vulnerability_found
-        self.session.task_specific_state["repeated_action"] = repeated_action
+        new_endpoint_found = len(session.endpoints_discovered) > endpoint_before
+        new_vulnerability_found = len(session.triggered_vulns) > vulns_before
+        session.task_specific_state["new_endpoint_discovered"] = new_endpoint_found
+        session.task_specific_state["new_vulnerability_found"] = new_vulnerability_found
+        session.task_specific_state["repeated_action"] = repeated_action
 
-        current_score = _compute_current_task_score(self.session, self.session.task_name)
+        current_score = _compute_current_task_score(session, session.task_name)
         observation = StateStrikeObservation(
-            step=self.session.step_count,
+            step=session.step_count,
             endpoint_called=endpoint_str,
             http_status=status,
             latency_ms=latency_ms,
             response_body=body,
-            session_order_count=self.session.order_count,
-            endpoints_discovered=sorted(self.session.endpoints_discovered),
-            vulnerabilities_found=sorted(self.session.triggered_vulns),
+            session_order_count=session.order_count,
+            endpoints_discovered=sorted(session.endpoints_discovered),
+            vulnerabilities_found=sorted(session.triggered_vulns),
             task_progress=current_score,
         )
 
-        task_cfg, _ = TASK_REGISTRY[self.session.task_name]
-        done = self.session.step_count >= task_cfg.max_steps or current_score >= task_cfg.success_threshold
+        task_cfg, _ = TASK_REGISTRY[session.task_name]
+        done = session.step_count >= task_cfg.max_steps or current_score >= task_cfg.success_threshold
 
         score_delta = max(0.0, current_score - prev_score)
         score_delta = min(score_delta, self.constants.STEP_DELTA_MAX)
@@ -221,8 +222,8 @@ class StateStrikeEnv:
             step_reward += self.constants.TERMINAL_BONUS
 
         step_reward = round(min(max(step_reward, 0.0), 1.0), 4)
-        self.session.previous_task_score = max(self.session.previous_task_score, current_score)
-        self.session.cumulative_reward += step_reward
+        session.previous_task_score = max(session.previous_task_score, current_score)
+        session.cumulative_reward += step_reward
 
         breakdown = {
             "score_delta": round(score_delta, 4),
@@ -240,12 +241,12 @@ class StateStrikeEnv:
             done=done,
             info={
                 "reward_breakdown": breakdown,
-                "task": self.session.task_name,
+                "task": session.task_name,
             },
         )
 
     async def state(self) -> StateStrikeState:
-        return self.session.as_state()
+        return self._session.as_state()
 
     def reset_sync(self, task_name: str = "endpoint_discovery") -> StepResult:
         return asyncio.run(self.reset(task_name=task_name))
