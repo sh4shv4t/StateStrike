@@ -1,3 +1,16 @@
+---
+title: RyFlow
+emoji: "🌊"
+colorFrom: purple
+colorTo: red
+sdk: docker
+python_version: "3.11"
+app_file: app.py
+pinned: false
+tags:
+  - openenv
+---
+
   _____ _        _       ____  _        _ _
  / ____| |      | |     / __ \| |      (_) |
 | (___ | |_ __ _| |_ ___| |  | | |_   _ _| |_
