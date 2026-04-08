@@ -145,7 +145,7 @@ class StateStrikeEnv:
             not session.redos_bounty_awarded
             and endpoint_str == EndpointChoice.POST_USERS.value
             and strategy_value == PayloadStrategy.REDOS_ATTACK.value
-            and latency_ms > self.constants.REDOS_LATENCY_THRESHOLD_MS
+            and status in (400, 422)
         ):
             session.redos_bounty_awarded = True
             session.triggered_vulns.add("redos")

@@ -169,7 +169,8 @@ def _normalize_action_data(data: dict, task_name: str, created_user_id: int | No
         data["payload_strategy"] = STRATEGY_ALIASES.get(strategy, strategy)
 
     if task_name == "exploit_chain" and created_user_id:
-        if data.get("endpoint") in ("POST /orders", "GET /orders"):
+        ep = str(data.get("endpoint", ""))
+        if "orders" in ep.lower():
             data["target_user_id"] = created_user_id
 
     return data
