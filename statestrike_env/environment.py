@@ -69,7 +69,7 @@ class StateStrikeEnv:
 
         for _ in range(30):
             try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
+                async with httpx.AsyncClient(timeout=env.constants.HONEYPOT_REQUEST_TIMEOUT) as client:
                     response = await client.get(f"{env.honeypot_url}/health")
                     if response.status_code == 200:
                         return env
@@ -310,7 +310,7 @@ class StateStrikeEnv:
         url = f"{self.honeypot_url}{path}"
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=self.constants.ACTION_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(timeout=self.constants.HONEYPOT_REQUEST_TIMEOUT) as client:
                 response = await client.request(method, url, params=params, json=payload)
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             header_latency = response.headers.get("X-Process-Time-Ms")

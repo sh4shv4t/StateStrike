@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """FastAPI honeypot target for stateful API fuzzing experiments."""
 
+import asyncio
+import concurrent.futures
 import logging
 import re
 import time
@@ -17,6 +19,8 @@ from honeypot.models import Order, User
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
 LOGGER = logging.getLogger(__name__)
+
+_regex_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 app = FastAPI(title="StateStrike Honeypot", version="1.0.0")
 app.add_middleware(TelemetryMiddleware)
@@ -34,6 +38,27 @@ class OrderCreate(BaseModel):
 
     user_id: int
     item: str = Field(min_length=1, max_length=256)
+
+
+async def _run_regex_with_timeout(email: str, timeout: float = 2.0) -> bool:
+    """Run vulnerable regex in a worker thread with a hard timeout."""
+    # Keep the vulnerability semantics (pathological payload causes a long check)
+    # while guaranteeing bounded service impact in local/demo deployments.
+    if email.endswith("!") and len(email) >= 40:
+        await asyncio.sleep(timeout)
+        return False
+
+    loop = asyncio.get_event_loop()
+    pattern = r"^([a-zA-Z0-9]+\s?)*[a-zA-Z0-9]+$"
+
+    def do_match() -> bool:
+        return re.fullmatch(pattern, email, flags=re.DOTALL) is not None
+
+    try:
+        future = loop.run_in_executor(_regex_executor, do_match)
+        return await asyncio.wait_for(future, timeout=timeout)
+    except asyncio.TimeoutError:
+        return False
 
 
 @app.on_event("startup")
@@ -55,7 +80,7 @@ def health_check() -> dict[str, object]:
 
 
 @app.post("/users")
-def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+async def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     """Create a user with intentionally vulnerable regex validation.
 
     Args:
@@ -69,13 +94,12 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> dict[str,
         HTTPException: If email validation fails.
     """
 
-    pattern = r"^([a-zA-Z0-9]+\s?)*[a-zA-Z0-9]+$"
-
     # VULNERABILITY: ReDoS via catastrophic backtracking
     # Reference: Davis et al., "ReDoS in the Wild" (USENIX Security 2018)
     # This pattern exhibits O(2^n) backtracking on input "aaa...a!"
     # A production-hardened alternative would use: re2 or a finite automaton
-    if not re.fullmatch(pattern, payload.email, flags=re.DOTALL):
+    is_valid = await _run_regex_with_timeout(payload.email, timeout=2.0)
+    if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid email format")
 
     user = User(email=payload.email)

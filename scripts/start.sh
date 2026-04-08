@@ -2,7 +2,7 @@
 set -e
 
 echo "[StateStrike] Starting honeypot on port 8000..."
-uvicorn honeypot.app:app --host 0.0.0.0 --port 8000 &
+uvicorn honeypot.app:app --host 0.0.0.0 --port 8000 --workers 4 &
 HONEYPOT_PID=$!
 
 echo "[StateStrike] Waiting for honeypot..."

@@ -13,6 +13,7 @@ from collections.abc import Generator
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
@@ -53,5 +54,10 @@ def init_db() -> None:
 
     from honeypot import models  # Local import avoids circular import at module load.
 
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+    except OperationalError as exc:
+        # Multiple uvicorn workers can race on first-table creation with SQLite.
+        if "already exists" not in str(exc).lower():
+            raise
     LOGGER.info("Initialized SQLite schema at %s", DATABASE_URL)
