@@ -1,0 +1,16 @@
+pycache
+__pycache__/
+*.pyc
+*.pyo
+*.db
+.venv
+venv
+.env
+.git
+*.log
+telemetry.json
+deploy-honeypot/
+deploy-env/
+dashboard/
+tests/
+.pytest_cache/
